@@ -83,7 +83,7 @@ Cargo.toml    — project manifest, no external dependencies
 cargo build --release
 
 # Run
-./target/release/log-analyzer path/to/logfile.log
+./target/release/ddn-rust path/to/logfile.log
 
 # Run tests
 cargo test
