@@ -1,0 +1,13 @@
+2025-01-01T12:00:00Z|INFO|auth|user logged in successfully
+2025-01-01T12:00:01Z|INFO|auth|session created for user_id=42
+2025-01-01T12:00:02Z|WARN|db|slow query detected took 1200ms
+2025-01-01T12:00:03Z|ERROR|auth|invalid token provided
+2025-01-01T12:00:04Z|INFO|payments|payment initiated amount=500
+2025-01-01T12:00:05Z|WARN|cache|cache miss for key user_session_99
+2025-01-01T12:00:06Z|ERROR|payments|payment failed gateway timeout
+2025-01-01T12:00:07Z|INFO|auth|user logged out user_id=42
+this is a malformed line
+2025-01-01T12:00:09Z|WARN|db|connection pool running low
+2025-01-01T12:00:10Z|ERROR|auth|brute force attempt detected ip=192.168.1.1
+just some random garbage text
+2025-01-01T12:00:11Z|INFO|cache|cache warmed up successfully

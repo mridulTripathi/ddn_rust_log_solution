@@ -1,0 +1,10 @@
+[package]
+name = "ddn_rust"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ddn_rust"
+path = "src/main.rs"
+
+[dependencies]
