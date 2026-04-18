@@ -1,120 +1,87 @@
-# DESIGN.md — Zero-Copy Log Analyzer
+# DESIGN.md — Architecture and Decision Record
 
-## Overview
+## Purpose
 
-This document explains the design decisions made in building the log analyzer, including how the file is read, how parsing avoids unnecessary allocations, where allocations are unavoidable, and how the solution behaves with very large files.
+This document captures the application architecture, the route selected for implementation, and why those choices were made. Usage and run commands are intentionally documented in `README.md`.
 
----
+## Chosen Architecture
 
-## How the File is Read and Processed
+The app follows a small pipeline-oriented architecture with clear module boundaries:
 
-The file is opened as a standard `File` and immediately wrapped in a `BufReader<File>`.
+- `src/main.rs`: CLI entrypoint, format selection, file streaming, chunk orchestration, and final reporting.
+- `src/parser.rs`: domain parser for a single log line (`parse_line`) and log format configuration (`LogFormat`).
+- `src/stats.rs`: aggregation model (`Stats`) for severity counters and malformed-line breakdown.
 
-`BufReader` maintains an internal read buffer (8KB by default). When we call `.lines()` on it, it reads chunks from disk into that buffer and yields one line at a time as a `Result<String, io::Error>`. At no point is the entire file loaded into memory — only the current buffer chunk is live at any time.
+### Data flow
 
-This means memory usage is effectively constant regardless of file size. A 10MB file and a 10GB file consume the same memory during processing.
+1. Open file and stream it line-by-line via `BufReader`.
+2. Accumulate lines into bounded chunks.
+3. Parse each chunk in parallel (`rayon`) and produce local stats.
+4. Merge local stats into a global accumulator.
+5. Print final summary (valid counts + malformed details).
 
-The `.lines()` iterator handles `\n` and `\r\n` line endings correctly, so we don't need to strip them manually.
+## Route Chosen and Why
 
----
+### 1) Streamed reads instead of loading whole file
 
-## How Parsing is Performed Without Unnecessary Allocations
+**Chosen route:** `BufReader` + iterator-based line reading.
 
-The core parsing logic is in `src/parser.rs`. The key design is using `str::splitn(4, '|')` on the borrowed `&str` line.
+**Why:**
 
-`splitn` returns an iterator of `&str` slices — these are pointers into the original string's memory, not new allocations. We extract the second field (the log level) this way and match it directly against string literals. No new `String` is constructed during parsing.
+- Keeps memory bounded for large files.
+- Naturally handles incremental processing.
+- Avoids upfront memory spikes from full-file reads.
 
-```
-line (owned String from BufReader)
- └── level_str: &str  ← just a pointer into `line`, no copy
-      └── match "INFO" / "WARN" / "ERROR" ← zero-copy comparison
-```
+### 2) Chunk-level parallel parsing instead of full-file parallel split
 
-The match arm then increments a `u64` counter. The entire parse path allocates nothing except the line itself (from BufReader).
+**Chosen route:** sequential I/O + parallel parse per chunk.
 
----
+**Why:**
 
-## Where Allocations Are Unavoidable
+- Preserves a simple and safe I/O model.
+- Gains parallel CPU parsing where helpful.
+- Avoids complexity of byte-offset partitioning and newline boundary stitching.
 
-1. **The line `String`** — `BufReader::lines()` returns `Result<String, _>`. This allocation per line is unavoidable when using the safe `.lines()` API. An alternative would be `read_line(&mut buf)` with a reused `String` buffer, which would reduce per-line allocations to zero by clearing and reusing the same buffer. I chose `.lines()` for clarity and simplicity — for a production system processing billions of lines, `read_line` reuse would be worth the added complexity.
+### 3) Configurable delimiters with a single parser path
 
-2. **`splitn` result collection** — `splitn` itself is lazy and doesn't allocate, but calling `.next()` on the iterator yields `&str` slices that live as long as the line. This is fine.
+**Chosen route:** `LogFormat` abstraction (`pipe`, `csv`, `tsv`) and one parsing function.
 
----
+**Why:**
 
-## Performance Trade-offs Made
+- Keeps parsing logic centralized and easier to maintain.
+- Supports multiple input styles without code duplication.
+- Preserves one validation and error-reporting flow across formats.
 
-- **`.lines()` vs `read_line` reuse**: Chose `.lines()` for readability. Each line incurs one `String` allocation. For most workloads this is fast enough. If profiling showed this as a bottleneck, switching to a reused buffer is a straightforward refactor.
+### 4) Malformed-line reasons instead of only malformed totals
 
-- **Configurable formats**: Parsing now supports `pipe`, `csv`, and `tsv` delimiters through a CLI flag (`--format`). This keeps a single parser path while allowing multiple log layouts that preserve the same logical columns.
+**Chosen route:** return malformed reasons from parser and aggregate by reason.
 
-- **No regex**: Regex would add a dependency and runtime overhead for a simple fixed-format parser. String slicing is faster and more predictable here.
+**Why:**
 
-- **Chunk-level parallelism**: The reader still streams lines sequentially to keep memory usage bounded, but lines are batched into fixed chunks and parsed in parallel via `rayon`. This helps when log parsing CPU cost is non-trivial.
+- Improves operational visibility for data quality issues.
+- Makes troubleshooting easier than a single malformed counter.
+- Keeps parser responsibilities explicit (classify, do not silently drop context).
 
----
+## Error Handling Strategy
 
-## How the Solution Behaves With Very Large Files
+- File open/read failures are surfaced as hard errors and exit the process.
+- Individual malformed lines are treated as non-fatal and included in summary reporting.
+- Unknown CLI args and unsupported formats fail fast with clear messages.
 
-- **Memory**: Constant. Only one `BufReader` buffer (~8KB) + one `Stats` struct (32 bytes) is live at a time.
-- **CPU**: Linear in file size. Each line is parsed once with O(1) work.
-- **Error resilience**: Malformed lines are counted and skipped — a single corrupt line does not stop processing or crash the program. The summary includes separate malformed counts grouped by reason. I/O errors (e.g. disk failure mid-read) propagate up and exit cleanly with an error message.
-- **Large line handling**: If a single log line is very long (e.g. a huge message field), `BufReader` will grow its buffer to accommodate it. This is handled by the standard library transparently.
+## Performance Characteristics
 
----
+- **Memory:** bounded by `BufReader` internals + current chunk + stats accumulator.
+- **CPU:** linear in line count; parsing cost is parallelized per chunk.
+- **Scalability behavior:** larger files benefit from streaming; CPU-heavy parsing benefits more from rayon than tiny files.
 
-## File Structure
+## Trade-offs and Non-goals
 
-```
-src/
-  main.rs     — CLI argument parsing, file opening, drives the analyze() loop
-  parser.rs   — parse_line() function, LogLevel enum, unit tests
-  stats.rs    — Stats struct, counters, print_summary()
-DESIGN.md     — this file
-Cargo.toml    — project manifest, no external dependencies
-```
+- Chosen for clarity over maximal micro-optimization (`.lines()` allocates a `String` per line).
+- Current parser is delimiter-based and intentionally not regex-driven.
+- The tool assumes a minimum 4-field schema and known level values.
 
----
+## Future Extensions
 
-## Running the Program
-
-```bash
-# Build
-cargo build --release
-
-# Run
-./target/release/ddn-rust path/to/logfile.log
-
-# Run with configurable format
-./target/release/ddn-rust path/to/logfile.log --format pipe
-./target/release/ddn-rust path/to/logfile.csv --format csv
-./target/release/ddn-rust path/to/logfile.tsv --format tsv
-
-# Run tests
-cargo test
-
-# Check formatting
-cargo fmt --check
-
-# Check for clippy warnings
-cargo clippy
-```
-
----
-
-## Performance Notes
-
-- Current processing model: **streamed I/O + chunked parallel parse**.
-- Memory remains bounded by the reader buffer and chunk size.
-- Parallel parsing is most beneficial when:
-  - lines are large,
-  - parsing logic is richer than simple split/match,
-  - or CPU is saturated before disk throughput.
-- For small files, single-thread and parallel performance are often similar due to scheduling overhead.
-- To benchmark quickly in your environment:
-
-```bash
-hyperfine \
-  "cargo run --release -- test.log --format pipe" \
-  "cargo run --release -- test.log --format csv"
-```
+- Add parser unit tests for each format and malformed-reason variant.
+- Add dedicated benchmark harness (for example with Criterion) for stable regressions tracking.
+- Support custom schemas (field order mapping) if input contracts expand.
