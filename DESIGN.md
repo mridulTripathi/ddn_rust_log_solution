@@ -46,11 +46,11 @@ The match arm then increments a `u64` counter. The entire parse path allocates n
 
 - **`.lines()` vs `read_line` reuse**: Chose `.lines()` for readability. Each line incurs one `String` allocation. For most workloads this is fast enough. If profiling showed this as a bottleneck, switching to a reused buffer is a straightforward refactor.
 
-- **`splitn(4, '|')`**: We only split up to 4 parts, so a message field containing `|` characters doesn't cause extra splits or parsing errors. This is intentional.
+- **Configurable formats**: Parsing now supports `pipe`, `csv`, and `tsv` delimiters through a CLI flag (`--format`). This keeps a single parser path while allowing multiple log layouts that preserve the same logical columns.
 
 - **No regex**: Regex would add a dependency and runtime overhead for a simple fixed-format parser. String slicing is faster and more predictable here.
 
-- **No parallelism**: Parallel chunk processing (e.g. with `rayon`) would complicate the streaming model and require either chunked file reading with offset tracking or pre-splitting the file. For most log files, I/O throughput is the bottleneck, not CPU, so parallelism wouldn't help significantly without also parallelizing disk reads. Left as a future improvement.
+- **Chunk-level parallelism**: The reader still streams lines sequentially to keep memory usage bounded, but lines are batched into fixed chunks and parsed in parallel via `rayon`. This helps when log parsing CPU cost is non-trivial.
 
 ---
 
@@ -58,7 +58,7 @@ The match arm then increments a `u64` counter. The entire parse path allocates n
 
 - **Memory**: Constant. Only one `BufReader` buffer (~8KB) + one `Stats` struct (32 bytes) is live at a time.
 - **CPU**: Linear in file size. Each line is parsed once with O(1) work.
-- **Error resilience**: Malformed lines are counted and skipped — a single corrupt line does not stop processing or crash the program. I/O errors (e.g. disk failure mid-read) propagate up and exit cleanly with an error message.
+- **Error resilience**: Malformed lines are counted and skipped — a single corrupt line does not stop processing or crash the program. The summary includes separate malformed counts grouped by reason. I/O errors (e.g. disk failure mid-read) propagate up and exit cleanly with an error message.
 - **Large line handling**: If a single log line is very long (e.g. a huge message field), `BufReader` will grow its buffer to accommodate it. This is handled by the standard library transparently.
 
 ---
@@ -85,6 +85,11 @@ cargo build --release
 # Run
 ./target/release/ddn-rust path/to/logfile.log
 
+# Run with configurable format
+./target/release/ddn-rust path/to/logfile.log --format pipe
+./target/release/ddn-rust path/to/logfile.csv --format csv
+./target/release/ddn-rust path/to/logfile.tsv --format tsv
+
 # Run tests
 cargo test
 
@@ -93,4 +98,23 @@ cargo fmt --check
 
 # Check for clippy warnings
 cargo clippy
+```
+
+---
+
+## Performance Notes
+
+- Current processing model: **streamed I/O + chunked parallel parse**.
+- Memory remains bounded by the reader buffer and chunk size.
+- Parallel parsing is most beneficial when:
+  - lines are large,
+  - parsing logic is richer than simple split/match,
+  - or CPU is saturated before disk throughput.
+- For small files, single-thread and parallel performance are often similar due to scheduling overhead.
+- To benchmark quickly in your environment:
+
+```bash
+hyperfine \
+  "cargo run --release -- test.log --format pipe" \
+  "cargo run --release -- test.log --format csv"
 ```

@@ -8,3 +8,4 @@ name = "ddn_rust"
 path = "src/main.rs"
 
 [dependencies]
+rayon = "1"

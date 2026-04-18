@@ -8,39 +8,64 @@ pub enum LogLevel {
 
 pub enum ParseResult {
     Valid(LogLevel),
-    Malformed,
+    Malformed(&'static str),
 }
 
-pub fn parse_line(line: &str) -> ParseResult {
+#[derive(Debug, Clone, Copy)]
+pub struct LogFormat {
+    delimiter: char,
+    level_idx: usize,
+    min_fields: usize,
+}
+
+impl LogFormat {
+    pub const PIPE: LogFormat = LogFormat {
+        delimiter: '|',
+        level_idx: 1,
+        min_fields: 4,
+    };
+
+    pub const CSV: LogFormat = LogFormat {
+        delimiter: ',',
+        level_idx: 1,
+        min_fields: 4,
+    };
+
+    pub const TSV: LogFormat = LogFormat {
+        delimiter: '\t',
+        level_idx: 1,
+        min_fields: 4,
+    };
+
+    pub fn from_name(name: &str) -> Option<LogFormat> {
+        match name.to_ascii_lowercase().as_str() {
+            "pipe" => Some(LogFormat::PIPE),
+            "csv" => Some(LogFormat::CSV),
+            "tsv" => Some(LogFormat::TSV),
+            _ => None,
+        }
+    }
+}
+
+pub fn parse_line(line: &str, format: LogFormat) -> ParseResult {
     let line = line.trim();
 
     if line.is_empty() {
-        return ParseResult::Malformed;
+        return ParseResult::Malformed("empty line");
     }
 
-    let mut parts = line.splitn(4, '|');
+    let parts: Vec<&str> = line.split(format.delimiter).collect();
 
-    let _timestamp = match parts.next() {
-        Some(t) => t,
-        None => return ParseResult::Malformed,
-    };
-
-    let level_str = match parts.next() {
-        Some(l) => l,
-        None => return ParseResult::Malformed,
-    };
-
-    if parts.next().is_none() {
-        return ParseResult::Malformed;
+    if parts.len() < format.min_fields {
+        return ParseResult::Malformed("too few fields");
     }
-    if parts.next().is_none() {
-        return ParseResult::Malformed;
-    }
+
+    let level_str = parts[format.level_idx].trim();
 
     match level_str {
         "INFO" => ParseResult::Valid(LogLevel::Info),
         "WARN" => ParseResult::Valid(LogLevel::Warn),
         "ERROR" => ParseResult::Valid(LogLevel::Error),
-        _ => ParseResult::Malformed,
+        _ => ParseResult::Malformed("unknown level"),
     }
 }
