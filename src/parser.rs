@@ -69,3 +69,55 @@ pub fn parse_line(line: &str, format: LogFormat) -> ParseResult {
         _ => ParseResult::Malformed("unknown level"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LogFormat, LogLevel, ParseResult, parse_line};
+
+    #[test]
+    fn parses_pipe_info_line() {
+        let line = "2025-01-01T00:00:00Z|INFO|auth|login ok";
+        let parsed = parse_line(line, LogFormat::PIPE);
+        assert!(matches!(parsed, ParseResult::Valid(LogLevel::Info)));
+    }
+
+    #[test]
+    fn parses_csv_warn_line() {
+        let line = "2025-01-01T00:00:00Z,WARN,api,slow request";
+        let parsed = parse_line(line, LogFormat::CSV);
+        assert!(matches!(parsed, ParseResult::Valid(LogLevel::Warn)));
+    }
+
+    #[test]
+    fn parses_tsv_error_line_with_spaces() {
+        let line = "2025-01-01T00:00:00Z\t ERROR \tworker\ttask failed";
+        let parsed = parse_line(line, LogFormat::TSV);
+        assert!(matches!(parsed, ParseResult::Valid(LogLevel::Error)));
+    }
+
+    #[test]
+    fn returns_empty_line_reason() {
+        let parsed = parse_line("   ", LogFormat::PIPE);
+        assert!(matches!(parsed, ParseResult::Malformed("empty line")));
+    }
+
+    #[test]
+    fn returns_too_few_fields_reason() {
+        let parsed = parse_line("2025-01-01|INFO|auth", LogFormat::PIPE);
+        assert!(matches!(parsed, ParseResult::Malformed("too few fields")));
+    }
+
+    #[test]
+    fn returns_unknown_level_reason() {
+        let parsed = parse_line("2025-01-01|DEBUG|auth|message", LogFormat::PIPE);
+        assert!(matches!(parsed, ParseResult::Malformed("unknown level")));
+    }
+
+    #[test]
+    fn format_lookup_is_case_insensitive() {
+        assert!(matches!(LogFormat::from_name("PiPe"), Some(_)));
+        assert!(matches!(LogFormat::from_name("CSV"), Some(_)));
+        assert!(matches!(LogFormat::from_name("tSv"), Some(_)));
+        assert!(LogFormat::from_name("json").is_none());
+    }
+}

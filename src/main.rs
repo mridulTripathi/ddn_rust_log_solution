@@ -58,7 +58,7 @@ fn parse_format_arg(args: &[String]) -> Result<LogFormat, String> {
                 return Err(format!(
                     "Unknown argument '{}'. Usage: <log_file> [--format pipe|csv|tsv]",
                     unknown
-                ))
+                ));
             }
         }
     }
@@ -107,4 +107,95 @@ fn analyze_chunk(lines: &[String], format: LogFormat) -> Stats {
             a.merge(b);
             a
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{analyze, analyze_chunk, parse_format_arg};
+    use crate::parser::LogFormat;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_format_arg_defaults_to_pipe() {
+        let parsed = parse_format_arg(&[]).expect("default format should parse");
+        let result = analyze_chunk(&["a|INFO|b|c".to_string()], parsed);
+        assert_eq!(result.info, 1);
+    }
+
+    #[test]
+    fn parse_format_arg_accepts_known_values() {
+        let parsed = parse_format_arg(&args(&["--format", "csv"])).expect("csv should parse");
+        let stats = analyze_chunk(&["a,WARN,b,c".to_string()], parsed);
+        assert_eq!(stats.warn, 1);
+    }
+
+    #[test]
+    fn parse_format_arg_rejects_missing_format_value() {
+        let err =
+            parse_format_arg(&args(&["--format"])).expect_err("should fail for missing value");
+        assert!(err.contains("--format requires one value"));
+    }
+
+    #[test]
+    fn parse_format_arg_rejects_unknown_value() {
+        let err = parse_format_arg(&args(&["--format", "json"]))
+            .expect_err("should fail for unknown format");
+        assert!(err.contains("Unsupported format"));
+    }
+
+    #[test]
+    fn parse_format_arg_rejects_unknown_argument() {
+        let err = parse_format_arg(&args(&["--unknown", "value"]))
+            .expect_err("should fail for unknown arg");
+        assert!(err.contains("Unknown argument"));
+    }
+
+    #[test]
+    fn analyze_counts_valid_and_malformed_lines() {
+        let input = "\
+2025-01-01T00:00:00Z|INFO|auth|ok
+2025-01-01T00:00:01Z|WARN|auth|slow
+2025-01-01T00:00:02Z|ERROR|auth|failed
+2025-01-01T00:00:03Z|DEBUG|auth|unknown
+bad line
+
+";
+        let stats = analyze(Cursor::new(input.as_bytes()), LogFormat::PIPE)
+            .expect("analysis should succeed");
+
+        assert_eq!(stats.info, 1);
+        assert_eq!(stats.warn, 1);
+        assert_eq!(stats.error, 1);
+        assert_eq!(stats.malformed, 3);
+        assert_eq!(stats.malformed_by_reason.get("unknown level"), Some(&1));
+        assert_eq!(stats.malformed_by_reason.get("too few fields"), Some(&1));
+        assert_eq!(stats.malformed_by_reason.get("empty line"), Some(&1));
+    }
+
+    #[test]
+    fn analyze_supports_csv_input() {
+        let input = "\
+2025-01-01T00:00:00Z,INFO,auth,ok
+2025-01-01T00:00:01Z,WARN,auth,slow
+";
+        let stats = analyze(Cursor::new(input.as_bytes()), LogFormat::CSV)
+            .expect("csv analysis should succeed");
+
+        assert_eq!(stats.info, 1);
+        assert_eq!(stats.warn, 1);
+        assert_eq!(stats.error, 0);
+        assert_eq!(stats.malformed, 0);
+    }
+
+    #[test]
+    fn analyze_chunk_handles_empty_input() {
+        let lines: Vec<String> = Vec::new();
+        let stats = analyze_chunk(&lines, LogFormat::PIPE);
+        assert_eq!(stats.total(), 0);
+    }
 }
